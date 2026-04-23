@@ -380,7 +380,18 @@ ssh {counterpart_user}@{counterpart_host} "tail -F {REMOTE_WORKLOG_PATH} 2>/dev/
 
 Measured end-to-end latency: ~12–15 seconds (validated across same-device and cross-device LAN scenarios). See Section 5.3 for the validation methodology.
 
+### C.1 Caveat: `tail -F` Zombie-Process Cleanup
+
+When a `Monitor` invocation ends — whether by reaching its `timeout_ms`, being explicitly stopped via `TaskStop`, or the Claude session closing — the outer `Monitor` task terminates, but the underlying `tail -F` subprocess may **remain running indefinitely**. This is a property of `tail -F` (not `-f`): it waits for a file to reappear even after deletion, rather than exiting on EOF. In practice this manifests as:
+
+- **Same-device deployments**: orphaned `tail -F` processes accumulate in the user's process table after each Monitor cycle. Harmless individually, but leaks over long-lived sessions with frequent re-arming.
+- **Cross-device (SSH-tunnelled) deployments**: the remote-side `tail -F` keeps the SSH session alive; the local `ssh` client process on the initiating device is also held open. Killing the remote tail cascades cleanup, but neither side exits on its own.
+
+**Mitigation pattern.** Before arming a new Monitor (or at session cleanup time), explicitly reap prior tails. For same-device: `pkill -f "tail -F {WORKLOG_PATH}"`. For cross-device: `ssh {user}@{host} "pkill -f 'tail -F {REMOTE_WORKLOG_PATH}'"`. On Linux, `tail -F --pid=$$` can tie the tail's lifetime to its parent shell; GNU-specific and unavailable on stock macOS `tail`.
+
+**Recommended hygiene in production deployments.** Bracket Monitor arming with a pre-arm `pkill` matching the exact WORKLOG path, and include a final pkill in any session-teardown hook. The v1.1 empirical validation did not implement this hygiene and produced three orphaned `tail -F` processes (one per phase) plus their attendant SSH sessions; they were identified and cleaned in a post-validation sweep. Future protocol versions may codify the reap-on-arm pattern as a mandatory wrapper around the Monitor invocation.
+
 ---
 
 *Proof-of-concept implementation and session logs available upon request.*
-*Protocol version: v1.1 · Initial validation: 2026-04-19/20 · Event-driven validation: 2026-04-20*
+*Protocol version: v1.1.1 · Initial validation: 2026-04-19/20 · Event-driven validation: 2026-04-20 · Caveat documented: 2026-04-23*
