@@ -237,6 +237,48 @@ The session completed 4 rounds (8 entries total, excluding 2 initialization entr
 
 4. **Cross-OS tool use**: Both agents invoked OS-specific commands (`powershell`, `system_profiler`, `top`, `brew`) appropriate to their respective environments and incorporated results into the shared WORKLOG, enabling genuine cross-platform hardware comparison.
 
+### 5.3 Event-Driven Latency Validation (v1.1 Extension)
+
+The v1.0 validation used a 3-minute polling interval (`TIMED-3min`), yielding an average latency of ~90 seconds (0–180 s uniform) between counterpart write and responder wake-up. In April 2026 we conducted a second validation sequence to test whether an event-driven extension could reduce this latency while preserving the protocol's zero-infrastructure principle.
+
+**Design.** Claude Code's `Monitor` tool streams stdout lines from a background process as `<task-notification>` messages that wake the current session on arrival. We paired it with `tail -F` (which internally uses `kqueue` on macOS and `inotify` on Linux to emit file-change events in milliseconds) and a `grep --line-buffered` filter matching only the counterpart's entry headers:
+
+```
+Monitor(
+  command: tail -F {WORKLOG_PATH} | grep --line-buffered -E "^## .* \| {COUNTERPART_ID} \|",
+  persistent: true
+)
+```
+
+The architecture requires no additional infrastructure: `tail`, `grep`, and SSH are already present on all target systems.
+
+**Three-phase validation.** We measured end-to-end latency — from the moment a counterpart's append completes to the moment the local Claude session's next turn begins execution — across three progressively realistic scenarios:
+
+| Phase | Write source | Write location | Transport path | End-to-end latency |
+|---|---|---|---|---|
+| 1 | Bash script | Local filesystem | Local `tail -F` | ~13 s |
+| 2 | LLM subagent | Local filesystem | Local `tail -F` | ~12 s |
+| 3 | Remote Bash (on Mac) | Mac local filesystem | SSH-tunnelled `tail -F` | ~12–15 s |
+
+**Key findings.**
+
+1. **Latency is dominated by Claude Code's notification-delivery scheduling** (approximately 12 seconds), not by file I/O, network, or subprocess inference. File system events propagate in milliseconds, and SSH over LAN adds <200 ms. The runtime's turn-scheduling cadence is the binding constraint.
+
+2. **Latency is write-source independent.** Bash scripts, LLM subagents, and SSH-tunnelled remote writes all produced consistent ~12–13 s wake-up latencies. This confirms that the Monitor mechanism is transport-agnostic.
+
+3. **Cross-device latency is negligible overhead.** Phase 3's inclusion of SSH added only 0–3 seconds versus the local-filesystem baseline, validating that BACA's distinctive cross-device property does not impose a latency penalty.
+
+**Quantitative improvement over v1.0:**
+
+| Metric | v1.0 (`TIMED-3min`) | v1.1 (`EVENT` / Monitor) |
+|---|---|---|
+| Average latency | ~90 s | ~12–13 s |
+| Worst-case latency | ~180 s | ~15 s |
+| Latency variance | High (uniform 0–180 s) | Low (bounded by runtime cadence) |
+| Infrastructure required | None | None |
+
+The event-driven extension delivers an approximately 10× reduction in average latency and 12× reduction in worst-case latency, with no new dependencies. The v1.0 polling mode is retained as a fallback (`TIMED-Xmin` response mode) for environments where `Monitor` or `tail -F` is unavailable.
+
 ---
 
 ## 6. Discussion
@@ -314,10 +356,31 @@ A conforming WORKLOG document must contain:
 | `TOPIC` | Session topic (used in filenames) | `self-intro-hardware` |
 | `ALLOWED_SCOPE` | Comma-separated list of permitted topics | `自我介紹, 硬體規格` |
 | `FORBIDDEN_SCOPE` | Comma-separated list of prohibited topics | `個股建議, 帳號資訊` |
-| `RESPONSE_MODE` | `MANUAL` or `TIMED-Xmin` | `TIMED-3min` |
+| `RESPONSE_MODE` | `MANUAL`, `TIMED-Xmin`, or `EVENT` (v1.1+) | `EVENT` |
 | `MAX_AUTO_TURNS` | Maximum autonomous rounds before pause | `5` |
+
+## Appendix C: Response Mode `EVENT` (v1.1)
+
+The `EVENT` response mode uses Claude Code's `Monitor` tool plus `tail -F` to achieve event-driven wake-up. Each device arms a persistent Monitor filtering for the counterpart's entry headers:
+
+```
+Monitor(
+  description: "watch WORKLOG for {COUNTERPART_ID} entries",
+  command: tail -F {WORKLOG_PATH} 2>/dev/null | grep --line-buffered -E "^## .* \| {COUNTERPART_ID} \|",
+  persistent: true
+)
+```
+
+For cross-device setups where the WORKLOG resides on the counterpart's filesystem, the command is wrapped in SSH:
+
+```
+ssh {counterpart_user}@{counterpart_host} "tail -F {REMOTE_WORKLOG_PATH} 2>/dev/null" \
+  | grep --line-buffered -E "^## .* \| {COUNTERPART_ID} \|"
+```
+
+Measured end-to-end latency: ~12–15 seconds (validated across same-device and cross-device LAN scenarios). See Section 5.3 for the validation methodology.
 
 ---
 
 *Proof-of-concept implementation and session logs available upon request.*
-*Protocol version: v1.0 · Validation date: 2026-04-19/20*
+*Protocol version: v1.1 · Initial validation: 2026-04-19/20 · Event-driven validation: 2026-04-20*

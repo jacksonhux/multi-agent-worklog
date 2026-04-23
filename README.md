@@ -79,12 +79,32 @@ Both files are written directly to the shared sync folder.
 
 ### Step 5 — Start the conversation
 
-On Device A, start the auto-polling loop:
+**Recommended (v1.1): Event-driven mode via `Monitor`**
+
+On each device, arm a `Monitor` watching the WORKLOG for the counterpart's entries:
+
 ```
-/loop 3m
+Monitor(
+  command: tail -F {WORKLOG_PATH} 2>/dev/null | grep --line-buffered -E "^## .* \| {COUNTERPART_ID} \|",
+  persistent: true
+)
 ```
 
-Both agents will now take turns writing to the WORKLOG autonomously, checking every 3 minutes for new entries.
+For cross-device setups where the WORKLOG lives on the other machine, wrap `tail -F` in SSH:
+
+```
+ssh {user}@{host} "tail -F {REMOTE_WORKLOG_PATH} 2>/dev/null" | grep --line-buffered -E "^## .* \| {COUNTERPART_ID} \|"
+```
+
+The counterpart writes a new entry → `tail -F` streams it → `Monitor` emits a `<task-notification>` → Claude wakes and responds. **Measured latency: ~12–15 seconds, same-device or cross-device.**
+
+**Fallback: Polling mode via `/loop`**
+
+If `Monitor` or `tail -F` is not available in your environment:
+```
+/loop 30s
+```
+This re-reads the WORKLOG every 30 seconds. Higher and less stable latency than the event-driven mode.
 
 ---
 
@@ -138,10 +158,11 @@ Verification result: PASS / FAIL
 
 ### Response Modes
 
-| Mode | Behavior |
-|---|---|
-| `MANUAL` | Agent waits for explicit human instruction before responding |
-| `TIMED-Xmin` | Agent polls the WORKLOG every X minutes and responds autonomously |
+| Mode | Behavior | Typical Latency |
+|---|---|---|
+| `EVENT` ⭐ (v1.1, recommended) | `Monitor` + `tail -F` wakes the agent on file change | **~12–15 s** |
+| `TIMED-Xmin` | Agent polls the WORKLOG every X minutes | 0 – X·60 s |
+| `MANUAL` | Agent waits for explicit human instruction | unbounded |
 
 ---
 
@@ -158,6 +179,18 @@ A complete proof-of-concept session is included in `examples/session-01/`:
 - **Pre-write Checklist failures**: 0
 
 Notable finding: In Round 2, the Mac Mini agent **self-corrected** a factual claim from Round 1 after independently running `which ollama` and `python3 -c "import mlx"` — demonstrating that genuine context isolation produces qualitatively different behavior from single-agent role-play.
+
+### v1.1 Event-Driven Validation (2026-04-20)
+
+A follow-up validation sequence confirmed that the `Monitor` + `tail -F` architecture (response mode `EVENT`) delivers consistent sub-15-second wake-up latency across three scenarios:
+
+| Phase | Write source | Transport | End-to-end latency |
+|---|---|---|---|
+| 1 | Bash script | Local `tail -F` | ~13 s |
+| 2 | LLM subagent | Local `tail -F` | ~12 s |
+| 3 | Remote Bash on macOS | SSH-tunnelled `tail -F` | ~12–15 s |
+
+This is a **~10× improvement** over v1.0's `TIMED-3min` polling, with no new infrastructure. The binding constraint is Claude Code's own notification-delivery cadence (~12 s); file I/O, network, and subprocess overhead each contribute <1 second. See `BACA_protocol_description.md` §5.3 for the full methodology.
 
 ---
 
