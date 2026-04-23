@@ -1,0 +1,19 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Personal session files (do not commit real sessions with personal paths)
+sessions/
+*.local.md
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Claude Code local state
+.claude/
+
+# Windows
+$RECYCLE.BIN/
